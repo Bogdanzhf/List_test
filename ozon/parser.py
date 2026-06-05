@@ -5,10 +5,11 @@ import logging
 import re
 from datetime import datetime
 from typing import Optional
+from urllib.parse import quote
 
 from playwright.async_api import Page
 
-from config import DELAY_MAX, DELAY_MIN, MAX_PAGES, TIMEOUT_MS
+from config import MAX_PAGES, TIMEOUT_MS
 from ozon.browser import create_browser_context, create_stealth_page, human_delay
 from ozon.models import PositionResult
 
@@ -81,27 +82,71 @@ async def get_skus_from_page(page: Page) -> list[str]:
 async def navigate_to_search(page: Page, query: str, page_num: int) -> bool:
     """
     Переходит на страницу поиска. При первом запросе — через главную.
-    Возвращает False если поймали капчу.
+    Возвращает False если поймали капчу или нет соединения.
     """
     if page_num == 1:
         logger.info("Заходим через главную страницу...")
-        await page.goto("https://www.ozon.ru/", wait_until="domcontentloaded")
-        await human_delay()
-        await page.mouse.move(600, 400)
-        await page.evaluate("window.scrollBy(0, 300)")
+        try:
+            await page.goto(
+                "https://www.ozon.ru/",
+                wait_until="networkidle",
+                timeout=TIMEOUT_MS,
+            )
+        except Exception as e:
+            logger.warning(f"Главная не загрузилась полностью: {e}")
+
+        # Проверяем что реально загрузилось
+        title = await page.title()
+        logger.debug(f"Главная — заголовок: {title}")
+
+        if "соединения" in title.lower() or "впн" in title.lower():
+            logger.error("Ozon недоступен — проверьте сеть или IP заблокирован")
+            return False
+
+        # Скролл только если страница нормально загрузилась
+        try:
+            await page.mouse.move(600, 400)
+            await asyncio.sleep(1.0)
+            await page.evaluate("window.scrollBy(0, 300)")
+            await asyncio.sleep(1.0)
+            await page.evaluate("window.scrollBy(0, -100)")
+        except Exception as e:
+            logger.debug(f"Скролл на главной прерван (ок): {e}")
+
         await human_delay()
 
-    url = OZON_SEARCH_URL.format(query=query, page=page_num)
+    url = OZON_SEARCH_URL.format(query=quote(query), page=page_num)
     logger.info(f"Переходим: {url}")
-    await page.goto(url, wait_until="domcontentloaded")
-    await human_delay()
-
-    if await check_captcha(page):
-        logger.warning("Обнаружена капча!")
-        return False
 
     try:
-        await page.wait_for_selector("a[href*='/product/']", timeout=TIMEOUT_MS)
+        await page.goto(url, wait_until="networkidle", timeout=TIMEOUT_MS)
+    except Exception as e:
+        logger.warning(f"Страница не загрузилась полностью: {e}")
+
+    await human_delay()
+
+    title = await page.title()
+    logger.debug(f"Заголовок страницы: {title}")
+
+    # Проверяем блокировки
+    if "соединения" in title.lower() or "впн" in title.lower():
+        logger.error("Ozon заблокировал запрос — смените IP или подождите")
+        return False
+
+    if await check_captcha(page):
+        logger.warning("Обнаружена капча — ждём 60 сек для ручного решения...")
+        await asyncio.sleep(60)
+        # Проверяем снова после ожидания
+        if await check_captcha(page):
+            logger.error("Капча не решена")
+            return False
+        logger.info("Капча решена, продолжаем")
+
+    try:
+        await page.wait_for_selector(
+            "a[href*='/product/']",
+            timeout=TIMEOUT_MS,
+        )
     except Exception:
         logger.warning(f"Карточки не появились на странице {page_num}")
         return False

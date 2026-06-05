@@ -60,7 +60,6 @@ async def create_browser_context() -> AsyncGenerator[
                 "--disable-blink-features=AutomationControlled",
                 "--disable-infobars",
                 "--disable-dev-shm-usage",
-                "--disable-extensions",
                 "--disable-gpu",
                 "--window-size=1920,1080",
             ],
