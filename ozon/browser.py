@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import random
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator
+from typing import Any, AsyncGenerator
 
 from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 from playwright_stealth import Stealth
 
-from config import DELAY_MAX, DELAY_MIN, HEADLESS, TIMEOUT_MS
+from config import BROWSER_TYPE, DELAY_MAX, DELAY_MIN, HEADLESS, PROXY_SERVER, TIMEOUT_MS
 
 # Пул User-Agent'ов реальных браузеров (Windows + Mac, разные версии Chrome)
 USER_AGENTS: list[str] = [
@@ -32,6 +32,15 @@ VIEWPORTS: list[dict[str, int]] = [
     {"width": 1280, "height": 720},
 ]
 
+BROWSER_LAUNCH_ARGS: list[str] = [
+    "--no-sandbox",
+    "--disable-blink-features=AutomationControlled",
+    "--disable-infobars",
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--window-size=1920,1080",
+]
+
 
 async def human_delay() -> None:
     """Случайная пауза для имитации действий живого пользователя."""
@@ -41,29 +50,43 @@ async def human_delay() -> None:
     await asyncio.sleep(delay)
 
 
+def _resolve_browser_engine(playwright: Any, browser_type: str) -> Any:
+    """Возвращает движок Playwright по имени из конфига."""
+    normalized = browser_type.lower().strip()
+    engines = {
+        "chromium": playwright.chromium,
+        "firefox": playwright.firefox,
+        "webkit": playwright.webkit,
+    }
+    if normalized not in engines:
+        raise ValueError(
+            f"Неизвестный BROWSER_TYPE={browser_type!r}. "
+            "Допустимо: chromium, firefox, webkit"
+        )
+    return engines[normalized]
+
+
 @asynccontextmanager
 async def create_browser_context() -> AsyncGenerator[
     tuple[Browser, BrowserContext], None
 ]:
     """
-    Запускает Playwright Chromium с настройками против детекции.
-    Возвращает браузер и контекст. Закрывает оба при выходе.
+    Запускает Playwright с настройками против детекции.
+    При каждом запуске ротируются User-Agent и viewport.
     """
     user_agent = random.choice(USER_AGENTS)
     viewport = random.choice(VIEWPORTS)
 
     async with async_playwright() as pw:
-        browser: Browser = await pw.chromium.launch(
-            headless=HEADLESS,
-            args=[
-                "--no-sandbox",
-                "--disable-blink-features=AutomationControlled",
-                "--disable-infobars",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--window-size=1920,1080",
-            ],
-        )
+        browser_engine = _resolve_browser_engine(pw, BROWSER_TYPE)
+        launch_kwargs: dict[str, object] = {
+            "headless": HEADLESS,
+            "args": BROWSER_LAUNCH_ARGS,
+        }
+        if PROXY_SERVER:
+            launch_kwargs["proxy"] = {"server": PROXY_SERVER}
+
+        browser: Browser = await browser_engine.launch(**launch_kwargs)
 
         context: BrowserContext = await browser.new_context(
             user_agent=user_agent,
@@ -82,7 +105,6 @@ async def create_browser_context() -> AsyncGenerator[
             },
         )
 
-        # Таймаут по умолчанию для всех действий в контексте
         context.set_default_timeout(TIMEOUT_MS)
 
         try:
@@ -100,7 +122,6 @@ async def create_stealth_page(context: BrowserContext) -> Page:
     page: Page = await context.new_page()
     await Stealth().apply_stealth_async(page)
 
-    # Дополнительно переопределяем webdriver через CDP
     await page.add_init_script("""
         Object.defineProperty(navigator, 'webdriver', {
             get: () => undefined,

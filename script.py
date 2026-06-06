@@ -3,7 +3,6 @@
 
 Использование:
     python script.py --query "нож туристический" --sku 885084802
-    python script.py --query "термос" --sku 123456789 --verbose
 """
 
 from __future__ import annotations
